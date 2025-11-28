@@ -1,64 +1,37 @@
 #!/bin/bash
-
 set -e
 
-# Variables - customize these!
-HOSTNAME="myarch"
-TIMEZONE="Europe/Oslo"
-LOCALE="en_US.UTF-8"
-KEYMAP="us"
-ROOT_PASSWORD="rootpassword"     # Change this or prompt later
+# Change this to your disk device
+DISK="/dev/sda1"
 
-# 1. Set timezone
-ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
-hwclock --systohc
+echo "WARNING: This will erase all data on $DISK!"
+read -p "Are you sure you want to continue? (yes/no): " CONFIRM
+if [[ "$CONFIRM" != "yes" ]]; then
+  echo "Aborting."
+  exit 1
+fi
 
-# 2. Localization
-sed -i "s/#$LOCALE/$LOCALE/" /etc/locale.gen
-locale-gen
-echo "LANG=$LOCALE" > /etc/locale.conf
-echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
+echo "Creating GPT partition table on $DISK..."
+parted --script "$DISK" \
+  mklabel gpt \
+  mkpart ESP fat32 1MiB 513MiB \
+  set 1 boot on \
+  mkpart primary ext4 513MiB 100%
 
-# 3. Hostname
-echo $HOSTNAME > /etc/hostname
+echo "Formatting partitions..."
+mkfs.fat -F32 "${DISK}p1"
+mkfs.ext4 "${DISK}p2"
 
-# 4. Hosts file
-cat << EOF > /etc/hosts
-127.0.0.1   localhost
-::1         localhost
-127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
-EOF
+echo "Mounting partitions..."
+mount "${DISK}p2" /mnt
+mkdir -p /mnt/boot
+mount "${DISK}p1" /mnt/boot
 
-# 5. Set root password
-echo "root:$ROOT_PASSWORD" | chpasswd
+echo "Installing base system..."
+pacstrap /mnt base linux linux-firmware
 
-# 6. Install essential packages
-pacman -Syu --noconfirm networkmanager sudo nano
+echo "Generating fstab..."
+genfstab -U /mnt >> /mnt/etc/fstab
 
-# 7. Enable NetworkManager
-systemctl enable NetworkManager
-
-# 8. Install bootloader (systemd-boot)
-bootctl install
-
-# Get PARTUUID of root partition
-ROOT_PARTUUID=$(blkid -s PARTUUID -o value /dev/sda2) # Change /dev/sda2 accordingly
-
-mkdir -p /boot/loader/entries
-cat << EOF > /boot/loader/entries/arch.conf
-title Arch Linux
-linux /vmlinuz-linux
-initrd /initramfs-linux.img
-options root=PARTUUID=$ROOT_PARTUUID rw
-EOF
-
-# 9. Install Xorg and XFCE desktop environment + LightDM
-pacman -S --noconfirm xorg xfce4 xfce4-goodies lightdm lightdm-gtk-greeter
-
-# Enable LightDM
-systemctl enable lightdm
-
-# 10. Set default target to graphical
-systemctl set-default graphical.target
-
-echo "Setup complete! Exit chroot and reboot."
+echo "Changing root into the new system..."
+arch-chroot /mnt /bin/bash
