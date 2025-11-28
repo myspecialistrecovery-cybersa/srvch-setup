@@ -1,37 +1,78 @@
 #!/bin/bash
 set -e
 
-# Change this to your disk device
-DISK="/dev/sda1"
+# Variables - customize these!
+HOSTNAME="myarch"
+TIMEZONE="Europe/Oslo"
+LOCALE="en_US.UTF-8"
+USERNAME="user"
+ROOT_PASSWORD="rootpassword"
+USER_PASSWORD="userpassword"
+ROOT_PART="/dev/mmcblk0p2"  # Change if your root partition is different
 
-echo "WARNING: This will erase all data on $DISK!"
-read -p "Are you sure you want to continue? (yes/no): " CONFIRM
-if [[ "$CONFIRM" != "yes" ]]; then
-  echo "Aborting."
-  exit 1
-fi
+echo "Setting timezone..."
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+hwclock --systohc
 
-echo "Creating GPT partition table on $DISK..."
-parted --script "$DISK" \
-  mklabel gpt \
-  mkpart ESP fat32 1MiB 513MiB \
-  set 1 boot on \
-  mkpart primary ext4 513MiB 100%
+echo "Configuring locales..."
+sed -i "s/#$LOCALE/$LOCALE/" /etc/locale.gen
+locale-gen
+echo "LANG=$LOCALE" > /etc/locale.conf
 
-echo "Formatting partitions..."
-mkfs.fat -F32 "${DISK}p1"
-mkfs.ext4 "${DISK}p2"
+echo "Setting hostname..."
+echo $HOSTNAME > /etc/hostname
 
-echo "Mounting partitions..."
-mount "${DISK}p2" /mnt
-mkdir -p /mnt/boot
-mount "${DISK}p1" /mnt/boot
+echo "Configuring /etc/hosts..."
+cat > /etc/hosts <<EOF
+127.0.0.1	localhost
+::1		    localhost
+127.0.1.1	$HOSTNAME.localdomain	$HOSTNAME
+EOF
 
-echo "Installing base system..."
-pacstrap /mnt base linux linux-firmware
+echo "Setting root password..."
+echo "root:$ROOT_PASSWORD" | chpasswd
 
-echo "Generating fstab..."
-genfstab -U /mnt >> /mnt/etc/fstab
+echo "Installing essential packages..."
+pacman -Syu --noconfirm networkmanager sudo nano
 
-echo "Changing root into the new system..."
-arch-chroot /mnt /bin/bash
+echo "Enabling NetworkManager service..."
+systemctl enable NetworkManager
+
+echo "Installing bootloader (systemd-boot)..."
+bootctl install
+
+PARTUUID=$(blkid -s PARTUUID -o value $ROOT_PART)
+
+echo "Creating bootloader entry..."
+mkdir -p /boot/loader/entries
+cat > /boot/loader/entries/arch.conf <<EOF
+title   Arch Linux
+linux   /vmlinuz-linux
+initrd  /initramfs-linux.img
+options root=PARTUUID=$PARTUUID rw
+EOF
+
+echo "Creating loader.conf..."
+cat > /boot/loader/loader.conf <<EOF
+default arch.conf
+timeout 3
+editor 0
+EOF
+
+echo "Creating user $USERNAME..."
+useradd -m -G wheel -s /bin/bash $USERNAME
+echo "$USERNAME:$USER_PASSWORD" | chpasswd
+
+echo "Configuring sudoers for wheel group..."
+sed -i 's/^# \(%wheel ALL=(ALL) ALL\)/\1/' /etc/sudoers
+
+echo "Installing Xorg, XFCE and LightDM..."
+pacman -S --noconfirm xorg xfce4 xfce4-goodies lightdm lightdm-gtk-greeter
+
+echo "Enabling LightDM..."
+systemctl enable lightdm
+
+echo "Setting graphical target as default..."
+systemctl set-default graphical.target
+
+echo "Setup complete! You can now exit and reboot."
